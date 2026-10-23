@@ -11,7 +11,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 st.set_page_config(page_title="Stock Valuation Ratios", layout="wide")
 
-# Larger fonts for metrics and tables without widening the page
 st.markdown("""
 <style>
     .stMetric { font-size: 1.15rem; }
@@ -32,7 +31,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Data from Yahoo Finance · Approximate · Educational use only · Not financial advice")
 
-def safe_call(func, *args, retries=2, **kwargs):
+def safe_call(func, *args, retries=3, **kwargs):
     for attempt in range(retries):
         try:
             result = func(*args, **kwargs)
@@ -41,13 +40,13 @@ def safe_call(func, *args, retries=2, **kwargs):
         except Exception:
             if attempt == retries - 1:
                 return None
-            time.sleep(1)
+            time.sleep(1.5)
     return None
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_data(symbol):
     stock = yf.Ticker(symbol)
-    hist = safe_call(stock.history, period="5y")
+    hist = safe_call(stock.history, period="10y")
     info = safe_call(lambda: stock.info) or {}
     quarterly_fin = safe_call(lambda: stock.quarterly_financials)
     annual_fin = safe_call(lambda: stock.financials)
@@ -110,7 +109,7 @@ if ticker:
         hist, info, q_fin, a_fin, q_cf, a_cf = get_data(ticker)
 
     if hist is None or hist.empty:
-        st.error(f"No price data for {ticker}.")
+        st.error(f"No price data for {ticker}. Yahoo Finance may be rate-limiting. Try again in a minute.")
     else:
         price = float(hist["Close"].iloc[-1])
         market_cap = info.get("marketCap") or info.get("enterpriseValue")
@@ -147,7 +146,7 @@ if ticker:
                 return
             
             st.caption(f"{len(df)} {label.lower()} periods")
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
 
             st.subheader(f"Average ({label} – {len(df)} periods)")
             avg_cols = st.columns(3)
