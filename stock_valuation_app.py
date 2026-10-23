@@ -10,6 +10,18 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 st.set_page_config(page_title="Stock Valuation Ratios", layout="wide")
+
+# Larger fonts for metrics and tables without widening the page
+st.markdown("""
+<style>
+    .stMetric { font-size: 1.15rem; }
+    .stMetric label { font-size: 0.95rem !important; }
+    .stMetric [data-testid="stMetricValue"] { font-size: 1.8rem !important; }
+    .stDataFrame { font-size: 1.05rem !important; }
+    .stCaption { font-size: 0.95rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("📊 Stock Valuation Ratios")
 st.caption("P/S · P/E · P/OCF · Current · History · Averages · % Undervalued/Overvalued")
 
@@ -101,18 +113,18 @@ if ticker:
         st.error(f"No price data for {ticker}.")
     else:
         price = float(hist["Close"].iloc[-1])
-        market_cap = info.get("marketCap")
-        shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        market_cap = info.get("marketCap") or info.get("enterpriseValue")
+        shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding") or info.get("floatShares")
 
         rev = latest_value(a_fin, ["Total Revenue", "TotalRevenue"])
         ni = latest_value(a_fin, ["Net Income", "NetIncome"])
         ocf = latest_value(a_cf, ["Operating Cash Flow", "OperatingCashFlow"])
         fcf = latest_value(a_cf, ["Free Cash Flow", "FreeCashFlow"])
 
-        ps = (market_cap / rev) if (market_cap and rev and rev > 0) else None
-        pe = (price / (ni / shares)) if (ni and shares and ni > 0) else None
+        ps = info.get("priceToSalesTrailing12Months") or ((market_cap / rev) if (market_cap and rev and rev > 0) else None)
+        pe = info.get("trailingPE") or ((price / (ni / shares)) if (ni and shares and ni > 0) else None)
         pocf = (market_cap / ocf) if (market_cap and ocf and ocf > 0) else None
-        pfcf = (market_cap / fcf) if (market_cap and fcf and fcf > 0) else None
+        pfcf = info.get("priceToFreeCashflow") or ((market_cap / fcf) if (market_cap and fcf and fcf > 0) else None)
 
         cols = st.columns(5)
         cols[0].metric("Price", f"${price:.2f}")
@@ -169,5 +181,3 @@ if ticker:
             show_history(a_hist, "Annual", ps, pe, pfcf or pocf)
 else:
     st.info("Enter a ticker in the sidebar.")
-
-
