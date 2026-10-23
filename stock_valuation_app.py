@@ -170,4 +170,4 @@ if ticker:
 else:
     st.info("Enter a ticker in the sidebar.")
 
-“Add historical ratios and averages”
+
