@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Stock Valuation Ratios App
-Uses yahooquery + restores historical ratio charts with optional grid overlay.
+Layout: tables → averages → current vs history → simple line charts below.
 """
 
 import warnings
@@ -12,8 +12,6 @@ import pandas as pd
 import numpy as np
 import time
 import re
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 try:
     from yahooquery import Ticker
@@ -39,7 +37,6 @@ yahooquery>=2.3.0
 streamlit
 pandas
 numpy
-plotly
 ```
 Then commit and reboot again.
 """)
@@ -55,7 +52,6 @@ with st.sidebar:
     )
     use_fcf = st.checkbox("Prefer Free Cash Flow (P/FCF)", value=False)
     show_negative_pe = st.checkbox("Show negative P/E values", value=True)
-    show_grid = st.checkbox("Show 2D grid overlay on charts", value=True)
     st.markdown("---")
     st.success("Using yahooquery")
 
@@ -223,35 +219,6 @@ def build_table(data, is_quarterly=False, use_fcf=False, show_neg_pe=True):
     return df
 
 
-def plot_ratios(df, title, show_grid=True):
-    if df is None or df.empty or "Period End" not in df.columns:
-        return None
-
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                        subplot_titles=("P/S", "P/E", "P/CF"))
-
-    fig.add_trace(go.Scatter(x=df["Period End"], y=df["P/S"], mode="lines+markers", name="P/S",
-                             line=dict(color="#1f77b4", width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["Period End"], y=df["P/E"], mode="lines+markers", name="P/E",
-                             line=dict(color="#ff7f0e", width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df["Period End"], y=df["P/CF"], mode="lines+markers", name="P/CF",
-                             line=dict(color="#2ca02c", width=2)), row=3, col=1)
-
-    fig.update_layout(
-        height=600,
-        title=title,
-        showlegend=False,
-        template="plotly_dark" if st.get_option("theme.base") == "dark" else "plotly_white",
-        margin=dict(l=40, r=20, t=40, b=40),
-    )
-
-    # Grid overlay
-    fig.update_xaxes(showgrid=show_grid, gridwidth=1, gridcolor="rgba(128,128,128,0.25)")
-    fig.update_yaxes(showgrid=show_grid, gridwidth=1, gridcolor="rgba(128,128,128,0.25)")
-
-    return fig
-
-
 # -------------------- Main --------------------
 tickers = parse_tickers(ticker_input)
 if not tickers:
@@ -324,9 +291,6 @@ for res in results:
         else:
             st.write(f"**{len(res['q_df'])} TTM periods**")
             st.dataframe(res["q_df"], use_container_width=True, hide_index=True)
-            fig = plot_ratios(res["q_df"], f"{res['Ticker']} — Quarterly Ratios", show_grid=show_grid)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
         if res["a_df"].empty:
@@ -334,10 +298,8 @@ for res in results:
         else:
             st.write(f"**{len(res['a_df'])} annual periods**")
             st.dataframe(res["a_df"], use_container_width=True, hide_index=True)
-            fig = plot_ratios(res["a_df"], f"{res['Ticker']} — Annual Ratios", show_grid=show_grid)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
 
+    # Averages and current vs history
     use_df = res["a_df"] if len(res["a_df"]) >= 3 else res["q_df"]
     n = len(use_df)
     label = "Annual" if (use_df is res["a_df"] and not res["a_df"].empty) else "Quarterly"
@@ -386,6 +348,27 @@ for res in results:
                           delta_color="inverse" if pcf_pct > 0 else "normal")
             else:
                 st.write(f"{cf_label}: —")
+
+        # Simple native Streamlit charts below
+        st.markdown("---")
+        st.markdown(f"**{label} Ratio Trends**")
+
+        chart_df = use_df.set_index("Period End")[["P/S", "P/E", "P/CF"]].copy()
+        chart_df = chart_df.dropna(how="all")
+
+        if not chart_df.empty:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.caption("P/S")
+                st.line_chart(chart_df[["P/S"]], height=250)
+            with col2:
+                st.caption("P/E")
+                st.line_chart(chart_df[["P/E"]], height=250)
+            with col3:
+                st.caption("P/CF")
+                st.line_chart(chart_df[["P/CF"]], height=250)
+        else:
+            st.info("Not enough data for charts.")
 
 st.markdown("---")
 st.caption("Data via yahooquery · Approximate · Educational use only · Not financial advice.")
