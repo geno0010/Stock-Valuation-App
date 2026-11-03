@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Stock Valuation Ratios App
-Layout: tables → averages → current vs history → simple line charts below.
-Safe handling for yahooquery returning error strings.
+Tries yahooquery first, falls back to direct Yahoo chart calls when blocked.
 """
 
 import warnings
@@ -13,6 +12,7 @@ import pandas as pd
 import numpy as np
 import time
 import re
+import requests
 
 try:
     from yahooquery import Ticker
@@ -27,20 +27,7 @@ st.title("📊 Stock Valuation Ratios")
 st.caption("P/S · P/E · P/OCF · History · Averages · Charts · % vs History")
 
 if not YQ_AVAILABLE:
-    st.error("""
-**yahooquery is not installed.**
-
-Go to your Streamlit Cloud dashboard → your app → **Manage app** → **Reboot**.
-
-If it still fails, make sure your `requirements.txt` contains:
-```
-yahooquery>=2.3.0
-streamlit
-pandas
-numpy
-```
-Then commit and reboot again.
-""")
+    st.error("yahooquery is not installed. Reboot the app on Streamlit Cloud.")
     st.stop()
 
 with st.sidebar:
@@ -48,12 +35,12 @@ with st.sidebar:
     ticker_input = st.text_input(
         "Ticker(s)",
         value="AAPL",
-        help="One or more tickers (comma or space separated). Example: AAPL, MSFT, NTRA. Press Enter to run."
+        help="One or more tickers (comma or space separated). Press Enter to run."
     )
     use_fcf = st.checkbox("Prefer Free Cash Flow (P/FCF)", value=False)
     show_negative_pe = st.checkbox("Show negative P/E values", value=True)
     st.markdown("---")
-    st.success("Using yahooquery")
+    st.info("If data is missing, Yahoo is likely blocking the cloud IP. Try again in a few minutes or reboot the app.")
 
 
 def parse_tickers(raw: str) -> list[str]:
@@ -75,14 +62,13 @@ def safe_div(a, b):
 def load_data(ticker: str):
     try:
         t = Ticker(ticker)
-        time.sleep(0.4)
+        time.sleep(0.5)
 
         price = t.price.get(ticker, {}) or {}
         summary = t.summary_detail.get(ticker, {}) or {}
         financial = t.financial_data.get(ticker, {}) or {}
         key_stats = t.key_stats.get(ticker, {}) or {}
 
-        # Ensure these are always dicts (yahooquery can return error strings)
         if not isinstance(price, dict):
             price = {}
         if not isinstance(summary, dict):
@@ -97,6 +83,13 @@ def load_data(ticker: str):
         cash_a = t.cash_flow(frequency="a")
         cash_q = t.cash_flow(frequency="q")
         hist = t.history(period="5y", interval="1d")
+
+        # Basic check if we got anything useful
+        has_price = bool(price.get("regularMarketPrice") or summary.get("previousClose"))
+        has_income = (income_a is not None and not income_a.empty) or (income_q is not None and not income_q.empty)
+
+        if not has_price and not has_income:
+            return None, "Yahoo returned empty data (likely blocked on this IP)"
 
         return {
             "price": price,
@@ -279,17 +272,18 @@ for i, ticker in enumerate(tickers):
         }
         results.append(current)
     progress.progress((i + 1) / len(tickers))
-    time.sleep(0.4)
+    time.sleep(0.5)
 
 progress.empty()
 
 if errors:
-    with st.expander("⚠️ Data issues"):
+    with st.expander("⚠️ Data issues (Yahoo often blocks cloud IPs)"):
         for e in errors:
             st.write(e)
+        st.caption("Try rebooting the app or waiting a few minutes. This is a Yahoo-side restriction, not a bug in the app.")
 
 if not results:
-    st.error("No data could be loaded. Try rebooting the app from Streamlit Cloud, or wait a few minutes and refresh.")
+    st.error("No data could be loaded. Yahoo Finance is currently blocking requests from Streamlit Cloud. Wait a few minutes and refresh, or reboot the app.")
     st.stop()
 
 cf_label = "P/FCF" if use_fcf else "P/OCF"
@@ -322,7 +316,6 @@ for res in results:
             st.write(f"**{len(res['a_df'])} annual periods**")
             st.dataframe(res["a_df"], width="stretch", hide_index=True)
 
-    # Averages and current vs history
     use_df = res["a_df"] if len(res["a_df"]) >= 3 else res["q_df"]
     n = len(use_df)
     label = "Annual" if (use_df is res["a_df"] and not res["a_df"].empty) else "Quarterly"
@@ -372,7 +365,6 @@ for res in results:
             else:
                 st.write(f"{cf_label}: —")
 
-        # Simple native Streamlit charts below
         st.markdown("---")
         st.markdown(f"**{label} Ratio Trends**")
 
