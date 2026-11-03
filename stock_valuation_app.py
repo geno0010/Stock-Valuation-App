@@ -21,11 +21,17 @@ st.caption("P/S · P/E · P/OCF · Powered by Financial Modeling Prep · History
 
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input(
-        "FMP API Key",
-        type="password",
-        help="Get a free key at financialmodelingprep.com (250 calls/day)"
-    )
+    # API key from Streamlit secrets (preferred) or fallback to input
+    api_key = st.secrets.get("FMP_API_KEY", "")
+    if not api_key:
+        api_key = st.text_input(
+            "FMP API Key",
+            type="password",
+            help="Get a free key at financialmodelingprep.com (250 calls/day). For shared use, add it as a Streamlit secret named FMP_API_KEY."
+        )
+    else:
+        st.success("Using embedded FMP API key")
+
     ticker_input = st.text_input(
         "Ticker(s)",
         value="AAPL",
