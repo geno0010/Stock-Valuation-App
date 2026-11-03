@@ -80,10 +80,10 @@ def load_ticker(ticker: str, api_key: str):
 
     quote = quote[0]
 
-    income_q, err_q = fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 20}, api_key)
-    income_a, err_a = fmp_get("income-statement", {"symbol": ticker, "period": "annual", "limit": 10}, api_key)
-    cash_q, err_cq = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 20}, api_key)
-    cash_a, err_ca = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "annual", "limit": 10}, api_key)
+    income_q, err_q = fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 5}, api_key)
+    income_a, err_a = fmp_get("income-statement", {"symbol": ticker, "period": "annual", "limit": 5}, api_key)
+    cash_q, err_cq = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 5}, api_key)
+    cash_a, err_ca = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "annual", "limit": 5}, api_key)
     ratios_ttm, _ = fmp_get("ratios-ttm", {"symbol": ticker}, api_key)
 
     return {
