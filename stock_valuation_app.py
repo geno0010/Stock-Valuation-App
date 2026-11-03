@@ -90,7 +90,6 @@ def series_to_df(series_dict, freq="annual"):
     if not data:
         return pd.DataFrame()
 
-    # Common ratio keys in Finnhub series
     rows = []
     dates = set()
     for key in ["pe", "ps", "pfcf", "pb"]:
@@ -100,16 +99,32 @@ def series_to_df(series_dict, freq="annual"):
                     dates.add(item["period"])
 
     for date in sorted(dates, reverse=True):
-        row = {"Period End": date}
+        # Compact date label
+        try:
+            dt = pd.to_datetime(date)
+            if freq == "quarterly":
+                q = (dt.month - 1) // 3 + 1
+                label_date = f"{dt.year} Q{q}"
+            else:
+                label_date = str(dt.year)
+        except Exception:
+            label_date = str(date)[:10]
+
+        row = {"Period": label_date}
         for key, label in [("pe", "P/E"), ("ps", "P/S"), ("pfcf", "P/CF"), ("pb", "P/B")]:
             if key in data:
                 for item in data[key]:
                     if isinstance(item, dict) and item.get("period") == date:
-                        row[label] = item.get("v")
+                        val = item.get("v")
+                        row[label] = round(val, 2) if isinstance(val, (int, float)) else val
                         break
         rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # Drop columns that are entirely empty
+    if not df.empty:
+        df = df.dropna(axis=1, how="all")
+    return df
 
 
 # -------------------- Main --------------------
@@ -140,6 +155,26 @@ for i, ticker in enumerate(tickers):
 
         annual_df = series_to_df(series, "annual")
         quarterly_df = series_to_df(series, "quarterly")
+
+        # Build TTM row from current metrics
+        def clean(v):
+            if v is None or v == 0:
+                return None
+            return round(float(v), 2)
+
+        ttm_row = pd.DataFrame([{
+            "Period": "TTM",
+            "P/S": clean(metrics.get("psTTM") or metrics.get("psAnnual")),
+            "P/E": clean(metrics.get("peBasicExclExtraTTM") or metrics.get("peTTM") or metrics.get("peAnnual")),
+            "P/CF": clean(metrics.get("pcfShareTTM") or metrics.get("priceToOperatingCashFlowTTM")),
+            "P/B": clean(metrics.get("pbQuarterly") or metrics.get("pbAnnual")),
+        }])
+
+        # Prepend TTM to both tables
+        if not quarterly_df.empty:
+            quarterly_df = pd.concat([ttm_row, quarterly_df], ignore_index=True)
+        if not annual_df.empty:
+            annual_df = pd.concat([ttm_row, annual_df], ignore_index=True)
 
         current = {
             "Ticker": ticker,
@@ -192,7 +227,7 @@ for res in results:
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "Period End": st.column_config.TextColumn(width="small"),
+                    "Period": st.column_config.TextColumn(width="small"),
                     "P/S": st.column_config.NumberColumn(format="%.2f", width="small"),
                     "P/E": st.column_config.NumberColumn(format="%.2f", width="small"),
                     "P/CF": st.column_config.NumberColumn(format="%.2f", width="small"),
@@ -210,7 +245,7 @@ for res in results:
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "Period End": st.column_config.TextColumn(width="small"),
+                    "Period": st.column_config.TextColumn(width="small"),
                     "P/S": st.column_config.NumberColumn(format="%.2f", width="small"),
                     "P/E": st.column_config.NumberColumn(format="%.2f", width="small"),
                     "P/CF": st.column_config.NumberColumn(format="%.2f", width="small"),
@@ -270,7 +305,7 @@ for res in results:
         st.markdown(f"**{label} Ratio Trends**")
         chart_cols = [c for c in ["P/S", "P/E", "P/CF"] if c in use_df.columns]
         if chart_cols and not use_df.empty:
-            chart_df = use_df.set_index("Period End")[chart_cols].dropna(how="all")
+            chart_df = use_df.set_index("Period")[chart_cols].dropna(how="all")
             if not chart_df.empty:
                 col1, col2, col3 = st.columns(3)
                 if "P/S" in chart_df.columns:
