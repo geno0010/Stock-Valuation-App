@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Stock Valuation Ratios App
-Uses Finnhub free API (supports all tickers, 60 calls/min).
+Uses Finnhub free API (supports all tickers).
+Includes historical ratios from the metric series, averages, and current vs history.
 """
 
 import warnings
@@ -10,14 +11,13 @@ warnings.filterwarnings("ignore")
 import streamlit as st
 import pandas as pd
 import numpy as np
-import time
 import re
 import requests
 
 st.set_page_config(page_title="Stock Valuation Ratios", page_icon="📊", layout="wide")
 
 st.title("📊 Stock Valuation Ratios")
-st.caption("P/S · P/E · P/OCF · Powered by Finnhub · All tickers · Current · History")
+st.caption("P/S · P/E · P/OCF · Powered by Finnhub · All tickers · History · Averages · Charts")
 
 with st.sidebar:
     st.header("Settings")
@@ -26,7 +26,7 @@ with st.sidebar:
         api_key = st.text_input(
             "Finnhub API Key",
             type="password",
-            help="Get a free key at finnhub.io (60 calls/min). For shared use, add it as a Streamlit secret named FINNHUB_API_KEY."
+            help="Get a free key at finnhub.io. For shared use, add it as a Streamlit secret named FINNHUB_API_KEY."
         )
     else:
         st.success("Using embedded Finnhub key")
@@ -77,9 +77,39 @@ def load_ticker(ticker: str, api_key: str):
         "profile": profile or {},
         "quote": quote or {},
         "metrics": metrics.get("metric", {}) if isinstance(metrics, dict) else {},
+        "series": metrics.get("series", {}) if isinstance(metrics, dict) else {},
         "ticker": ticker,
         "errors": [e for e in [err_q, err_m] if e],
     }, None
+
+
+def series_to_df(series_dict, freq="annual"):
+    if not series_dict or freq not in series_dict:
+        return pd.DataFrame()
+    data = series_dict[freq]
+    if not data:
+        return pd.DataFrame()
+
+    # Common ratio keys in Finnhub series
+    rows = []
+    dates = set()
+    for key in ["pe", "ps", "pfcf", "pb"]:
+        if key in data and isinstance(data[key], list):
+            for item in data[key]:
+                if isinstance(item, dict) and "period" in item:
+                    dates.add(item["period"])
+
+    for date in sorted(dates, reverse=True):
+        row = {"Period End": date}
+        for key, label in [("pe", "P/E"), ("ps", "P/S"), ("pfcf", "P/CF"), ("pb", "P/B")]:
+            if key in data:
+                for item in data[key]:
+                    if isinstance(item, dict) and item.get("period") == date:
+                        row[label] = item.get("v")
+                        break
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 # -------------------- Main --------------------
@@ -106,6 +136,10 @@ for i, ticker in enumerate(tickers):
         profile = data["profile"]
         quote = data["quote"]
         metrics = data["metrics"]
+        series = data["series"]
+
+        annual_df = series_to_df(series, "annual")
+        quarterly_df = series_to_df(series, "quarterly")
 
         current = {
             "Ticker": ticker,
@@ -115,7 +149,8 @@ for i, ticker in enumerate(tickers):
             "P/E": metrics.get("peBasicExclExtraTTM") or metrics.get("peTTM") or metrics.get("peAnnual"),
             "P/OCF": metrics.get("pcfShareTTM") or metrics.get("priceToOperatingCashFlowTTM"),
             "Market Cap": profile.get("marketCapitalization"),
-            "metrics": metrics,
+            "annual_df": annual_df,
+            "quarterly_df": quarterly_df,
         }
         results.append(current)
         if data.get("errors"):
@@ -145,33 +180,89 @@ for res in results:
     c4.metric("P/OCF", f"{res['P/OCF']:.2f}" if res.get("P/OCF") else "—")
     c5.metric("Market Cap", f"${res['Market Cap']/1e3:.1f}B" if res.get("Market Cap") else "—")
 
-    # Show a selection of useful metrics from Finnhub
-    st.markdown("**Key Metrics**")
-    m = res["metrics"]
-    metrics_to_show = {
-        "P/E (TTM)": m.get("peBasicExclExtraTTM"),
-        "P/S (TTM)": m.get("psTTM"),
-        "P/B": m.get("pbQuarterly") or m.get("pbAnnual"),
-        "ROE (TTM)": m.get("roeTTM"),
-        "ROA (TTM)": m.get("roaTTM"),
-        "Debt/Equity": m.get("totalDebt/totalEquityQuarterly"),
-        "Current Ratio": m.get("currentRatioQuarterly"),
-        "Gross Margin (TTM)": m.get("grossMarginTTM"),
-        "Operating Margin (TTM)": m.get("operatingMarginTTM"),
-        "52W High": m.get("52WeekHigh"),
-        "52W Low": m.get("52WeekLow"),
-    }
+    tab1, tab2 = st.tabs(["Quarterly", "Annual"])
 
-    cols = st.columns(4)
-    for i, (label, value) in enumerate(metrics_to_show.items()):
-        with cols[i % 4]:
-            if value is not None:
-                if isinstance(value, float):
-                    st.metric(label, f"{value:.2f}")
-                else:
-                    st.metric(label, str(value))
+    with tab1:
+        if res["quarterly_df"].empty:
+            st.info("Limited or no quarterly history.")
+        else:
+            st.write(f"**{len(res['quarterly_df'])} quarterly periods**")
+            st.dataframe(res["quarterly_df"], width="stretch", hide_index=True)
+
+    with tab2:
+        if res["annual_df"].empty:
+            st.info("Limited or no annual history.")
+        else:
+            st.write(f"**{len(res['annual_df'])} annual periods**")
+            st.dataframe(res["annual_df"], width="stretch", hide_index=True)
+
+    # Averages and current vs history (prefer annual if available)
+    use_df = res["annual_df"] if len(res["annual_df"]) >= 3 else res["quarterly_df"]
+    n = len(use_df)
+    label = "Annual" if (use_df is res["annual_df"] and not res["annual_df"].empty) else "Quarterly"
+
+    if n > 0:
+        ps_avg = use_df["P/S"].mean(skipna=True) if "P/S" in use_df.columns else np.nan
+        pe_num = pd.to_numeric(use_df["P/E"], errors="coerce") if "P/E" in use_df.columns else pd.Series(dtype=float)
+        pe_avg = pe_num[pe_num > 0].mean() if not show_negative_pe else pe_num.mean(skipna=True)
+        pcf_avg = use_df["P/CF"].mean(skipna=True) if "P/CF" in use_df.columns else np.nan
+
+        st.markdown(f"**Average ({label} – {n} periods)**")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Avg P/S", f"{ps_avg:.2f}" if not pd.isna(ps_avg) else "—")
+        a2.metric("Avg P/E", f"{pe_avg:.2f}" if not pd.isna(pe_avg) else "N/A")
+        a3.metric("Avg P/CF", f"{pcf_avg:.2f}" if not pd.isna(pcf_avg) else "—")
+
+        def pct(curr, avg):
+            if curr is None or pd.isna(curr) or avg is None or pd.isna(avg) or avg == 0:
+                return None
+            return (curr - avg) / abs(avg) * 100
+
+        ps_pct = pct(res.get("P/S"), ps_avg)
+        pe_pct = pct(res.get("P/E") if res.get("P/E") and (res.get("P/E") > 0 or show_negative_pe) else None, pe_avg)
+        pcf_pct = pct(res.get("P/OCF"), pcf_avg)
+
+        st.markdown("**Current vs History**")
+        v1, v2, v3 = st.columns(3)
+        with v1:
+            if ps_pct is not None:
+                st.metric("P/S vs avg", f"{res.get('P/S'):.2f}", delta=f"{ps_pct:+.1f}%",
+                          delta_color="inverse" if ps_pct > 0 else "normal")
             else:
-                st.metric(label, "—")
+                st.write("P/S: —")
+        with v2:
+            if pe_pct is not None:
+                st.metric("P/E vs avg", f"{res.get('P/E'):.2f}", delta=f"{pe_pct:+.1f}%",
+                          delta_color="inverse" if pe_pct > 0 else "normal")
+            else:
+                st.write("P/E: N/A")
+        with v3:
+            if pcf_pct is not None:
+                st.metric("P/CF vs avg", f"{res.get('P/OCF'):.2f}", delta=f"{pcf_pct:+.1f}%",
+                          delta_color="inverse" if pcf_pct > 0 else "normal")
+            else:
+                st.write("P/CF: —")
+
+        # Simple charts
+        st.markdown("---")
+        st.markdown(f"**{label} Ratio Trends**")
+        chart_cols = [c for c in ["P/S", "P/E", "P/CF"] if c in use_df.columns]
+        if chart_cols and not use_df.empty:
+            chart_df = use_df.set_index("Period End")[chart_cols].dropna(how="all")
+            if not chart_df.empty:
+                col1, col2, col3 = st.columns(3)
+                if "P/S" in chart_df.columns:
+                    with col1:
+                        st.caption("P/S")
+                        st.line_chart(chart_df[["P/S"]], height=250)
+                if "P/E" in chart_df.columns:
+                    with col2:
+                        st.caption("P/E")
+                        st.line_chart(chart_df[["P/E"]], height=250)
+                if "P/CF" in chart_df.columns:
+                    with col3:
+                        st.caption("P/CF")
+                        st.line_chart(chart_df[["P/CF"]], height=250)
 
 st.markdown("---")
 st.caption("Data from Finnhub · Free tier · Approximate · Educational use only · Not financial advice.")
