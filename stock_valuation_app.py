@@ -2,6 +2,7 @@
 """
 Stock Valuation Ratios App
 Layout: tables → averages → current vs history → simple line charts below.
+Safe handling for yahooquery returning error strings.
 """
 
 import warnings
@@ -81,6 +82,16 @@ def load_data(ticker: str):
         financial = t.financial_data.get(ticker, {}) or {}
         key_stats = t.key_stats.get(ticker, {}) or {}
 
+        # Ensure these are always dicts (yahooquery can return error strings)
+        if not isinstance(price, dict):
+            price = {}
+        if not isinstance(summary, dict):
+            summary = {}
+        if not isinstance(financial, dict):
+            financial = {}
+        if not isinstance(key_stats, dict):
+            key_stats = {}
+
         income_a = t.income_statement(frequency="a")
         income_q = t.income_statement(frequency="q")
         cash_a = t.cash_flow(frequency="a")
@@ -132,7 +143,13 @@ def build_table(data, is_quarterly=False, use_fcf=False, show_neg_pe=True):
 
     rows = []
     dates = list(income.index)
-    shares = data["key_stats"].get("sharesOutstanding") or data["summary"].get("sharesOutstanding")
+    key_stats = data.get("key_stats") or {}
+    summary = data.get("summary") or {}
+    shares = None
+    if isinstance(key_stats, dict):
+        shares = key_stats.get("sharesOutstanding")
+    if not shares and isinstance(summary, dict):
+        shares = summary.get("sharesOutstanding")
 
     for i, date in enumerate(dates):
         try:
@@ -238,9 +255,16 @@ for i, ticker in enumerate(tickers):
         q_df = build_table(data, is_quarterly=True, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
         a_df = build_table(data, is_quarterly=False, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
 
-        price = data["price"]
-        summary = data["summary"]
-        fin = data["financial"]
+        price = data.get("price") or {}
+        summary = data.get("summary") or {}
+        fin = data.get("financial") or {}
+
+        if not isinstance(price, dict):
+            price = {}
+        if not isinstance(summary, dict):
+            summary = {}
+        if not isinstance(fin, dict):
+            fin = {}
 
         current = {
             "Ticker": ticker,
@@ -289,14 +313,14 @@ for res in results:
             st.info("Limited or no quarterly data.")
         else:
             st.write(f"**{len(res['q_df'])} TTM periods**")
-            st.dataframe(res["q_df"], use_container_width=True, hide_index=True)
+            st.dataframe(res["q_df"], width="stretch", hide_index=True)
 
     with tab2:
         if res["a_df"].empty:
             st.info("No annual data.")
         else:
             st.write(f"**{len(res['a_df'])} annual periods**")
-            st.dataframe(res["a_df"], use_container_width=True, hide_index=True)
+            st.dataframe(res["a_df"], width="stretch", hide_index=True)
 
     # Averages and current vs history
     use_df = res["a_df"] if len(res["a_df"]) >= 3 else res["q_df"]
