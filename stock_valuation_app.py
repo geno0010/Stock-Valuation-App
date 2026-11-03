@@ -187,7 +187,18 @@ for res in results:
             st.info("Limited or no quarterly history.")
         else:
             st.write(f"**{len(res['quarterly_df'])} quarterly periods**")
-            st.dataframe(res["quarterly_df"], width="stretch", hide_index=True)
+            st.dataframe(
+                res["quarterly_df"],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Period End": st.column_config.TextColumn(width="small"),
+                    "P/S": st.column_config.NumberColumn(format="%.2f", width="small"),
+                    "P/E": st.column_config.NumberColumn(format="%.2f", width="small"),
+                    "P/CF": st.column_config.NumberColumn(format="%.2f", width="small"),
+                    "P/B": st.column_config.NumberColumn(format="%.2f", width="small"),
+                }
+            )
 
     with tab2:
         if res["annual_df"].empty:
