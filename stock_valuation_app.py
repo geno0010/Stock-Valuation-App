@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Stock Valuation Ratios App
-Tries yahooquery first, falls back to direct Yahoo chart calls when blocked.
+Uses Financial Modeling Prep free API.
 """
 
 import warnings
@@ -14,24 +14,18 @@ import time
 import re
 import requests
 
-try:
-    from yahooquery import Ticker
-    YQ_AVAILABLE = True
-except ImportError:
-    YQ_AVAILABLE = False
-    Ticker = None
-
 st.set_page_config(page_title="Stock Valuation Ratios", page_icon="📊", layout="wide")
 
 st.title("📊 Stock Valuation Ratios")
-st.caption("P/S · P/E · P/OCF · History · Averages · Charts · % vs History")
-
-if not YQ_AVAILABLE:
-    st.error("yahooquery is not installed. Reboot the app on Streamlit Cloud.")
-    st.stop()
+st.caption("P/S · P/E · P/OCF · Powered by Financial Modeling Prep · History · Averages · Charts")
 
 with st.sidebar:
     st.header("Settings")
+    api_key = st.text_input(
+        "FMP API Key",
+        type="password",
+        help="Get a free key at financialmodelingprep.com (250 calls/day)"
+    )
     ticker_input = st.text_input(
         "Ticker(s)",
         value="AAPL",
@@ -40,7 +34,7 @@ with st.sidebar:
     use_fcf = st.checkbox("Prefer Free Cash Flow (P/FCF)", value=False)
     show_negative_pe = st.checkbox("Show negative P/E values", value=True)
     st.markdown("---")
-    st.info("If data is missing, Yahoo is likely blocking the cloud IP. Try again in a few minutes or reboot the app.")
+    st.markdown("[Get free FMP API key](https://site.financialmodelingprep.com/developer/docs)")
 
 
 def parse_tickers(raw: str) -> list[str]:
@@ -59,168 +53,118 @@ def safe_div(a, b):
         return np.nan
 
 
-def load_data(ticker: str):
+def fmp_get(endpoint: str, params: dict, api_key: str):
+    params = params.copy()
+    params["apikey"] = api_key
     try:
-        t = Ticker(ticker)
-        time.sleep(0.5)
-
-        price = t.price.get(ticker, {}) or {}
-        summary = t.summary_detail.get(ticker, {}) or {}
-        financial = t.financial_data.get(ticker, {}) or {}
-        key_stats = t.key_stats.get(ticker, {}) or {}
-
-        if not isinstance(price, dict):
-            price = {}
-        if not isinstance(summary, dict):
-            summary = {}
-        if not isinstance(financial, dict):
-            financial = {}
-        if not isinstance(key_stats, dict):
-            key_stats = {}
-
-        income_a = t.income_statement(frequency="a")
-        income_q = t.income_statement(frequency="q")
-        cash_a = t.cash_flow(frequency="a")
-        cash_q = t.cash_flow(frequency="q")
-        hist = t.history(period="5y", interval="1d")
-
-        # Basic check if we got anything useful
-        has_price = bool(price.get("regularMarketPrice") or summary.get("previousClose"))
-        has_income = (income_a is not None and not income_a.empty) or (income_q is not None and not income_q.empty)
-
-        if not has_price and not has_income:
-            return None, "Yahoo returned empty data (likely blocked on this IP)"
-
-        return {
-            "price": price,
-            "summary": summary,
-            "financial": financial,
-            "key_stats": key_stats,
-            "income_a": income_a,
-            "income_q": income_q,
-            "cash_a": cash_a,
-            "cash_q": cash_q,
-            "hist": hist,
-            "ticker": ticker,
-        }, None
+        r = requests.get(f"https://financialmodelingprep.com/stable/{endpoint}", params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and "Error Message" in data:
+            return None, data["Error Message"]
+        return data, None
     except Exception as e:
         return None, str(e)
 
 
-def build_table(data, is_quarterly=False, use_fcf=False, show_neg_pe=True):
-    income = data["income_q"] if is_quarterly else data["income_a"]
-    cf = data["cash_q"] if is_quarterly else data["cash_a"]
-    hist = data["hist"]
-    ticker = data["ticker"]
+def load_ticker(ticker: str, api_key: str):
+    # Quote
+    quote, err = fmp_get("quote", {"symbol": ticker}, api_key)
+    if err or not quote or not isinstance(quote, list) or len(quote) == 0:
+        return None, err or "No quote data"
 
-    if income is None or income.empty:
+    quote = quote[0]
+
+    # Income statements (quarterly and annual)
+    income_q, err_q = fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 20}, api_key)
+    income_a, err_a = fmp_get("income-statement", {"symbol": ticker, "period": "annual", "limit": 10}, api_key)
+
+    # Cash flow
+    cash_q, err_cq = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 20}, api_key)
+    cash_a, err_ca = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "annual", "limit": 10}, api_key)
+
+    # Ratios (for current values)
+    ratios_ttm, _ = fmp_get("ratios-ttm", {"symbol": ticker}, api_key)
+
+    return {
+        "quote": quote,
+        "income_q": income_q if isinstance(income_q, list) else [],
+        "income_a": income_a if isinstance(income_a, list) else [],
+        "cash_q": cash_q if isinstance(cash_q, list) else [],
+        "cash_a": cash_a if isinstance(cash_a, list) else [],
+        "ratios_ttm": ratios_ttm[0] if isinstance(ratios_ttm, list) and ratios_ttm else {},
+        "ticker": ticker,
+    }, None
+
+
+def build_table(statements, cashflows, is_quarterly=False, use_fcf=False, show_neg_pe=True):
+    if not statements:
         return pd.DataFrame()
 
-    try:
-        if isinstance(income.index, pd.MultiIndex):
-            income = income.reset_index()
-        if "asOfDate" in income.columns:
-            income = income.set_index("asOfDate")
-        income = income.sort_index()
-
-        if cf is not None and not cf.empty:
-            if isinstance(cf.index, pd.MultiIndex):
-                cf = cf.reset_index()
-            if "asOfDate" in cf.columns:
-                cf = cf.set_index("asOfDate")
-            cf = cf.sort_index()
-        else:
-            cf = pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+    # Sort by date ascending
+    statements = sorted(statements, key=lambda x: x.get("date", ""))
+    cash_map = {c.get("date"): c for c in (cashflows or [])}
 
     rows = []
-    dates = list(income.index)
-    key_stats = data.get("key_stats") or {}
-    summary = data.get("summary") or {}
-    shares = None
-    if isinstance(key_stats, dict):
-        shares = key_stats.get("sharesOutstanding")
-    if not shares and isinstance(summary, dict):
-        shares = summary.get("sharesOutstanding")
-
-    for i, date in enumerate(dates):
-        try:
-            if is_quarterly and i < 3:
-                continue
-
-            rev_series = income.get("TotalRevenue")
-            if rev_series is None:
-                rev_series = income.get("OperatingRevenue")
-            if rev_series is None:
-                continue
-            if is_quarterly:
-                rev = rev_series.iloc[i-3:i+1].sum()
-            else:
-                rev = rev_series.iloc[i]
-
-            ni = np.nan
-            for col in ["NetIncome", "NetIncomeCommonStockholders", "NetIncomeContinuousOperations"]:
-                if col in income.columns:
-                    if is_quarterly:
-                        ni = income[col].iloc[i-3:i+1].sum()
-                    else:
-                        ni = income[col].iloc[i]
-                    break
-
-            ttm_cf = np.nan
-            ocf_col = next((c for c in ["OperatingCashFlow", "CashFlowFromContinuingOperatingActivities"] if c in cf.columns), None)
-            fcf_col = "FreeCashFlow" if "FreeCashFlow" in cf.columns else None
-            if use_fcf and fcf_col:
-                if is_quarterly:
-                    ttm_cf = cf[fcf_col].reindex(income.index).iloc[i-3:i+1].sum()
-                else:
-                    ttm_cf = cf[fcf_col].reindex(income.index).iloc[i]
-            elif ocf_col:
-                if is_quarterly:
-                    ttm_cf = cf[ocf_col].reindex(income.index).iloc[i-3:i+1].sum()
-                else:
-                    ttm_cf = cf[ocf_col].reindex(income.index).iloc[i]
-
-            price = np.nan
-            if hist is not None and not hist.empty:
-                try:
-                    h = hist.copy()
-                    if isinstance(h.index, pd.MultiIndex):
-                        h = h.reset_index()
-                        h = h[h["symbol"] == ticker] if "symbol" in h.columns else h
-                    if "date" in h.columns:
-                        h = h.set_index("date")
-                    h.index = pd.to_datetime(h.index).tz_localize(None)
-                    avail = h[h.index <= pd.Timestamp(date).tz_localize(None)]
-                    if not avail.empty:
-                        price = float(avail["close"].iloc[-1])
-                except Exception:
-                    pass
-
-            if pd.isna(price) or price <= 0 or not shares:
-                continue
-
-            mkt_cap = price * shares
-            ps = safe_div(mkt_cap, rev)
-            pe = safe_div(price, ni / shares) if not pd.isna(ni) else np.nan
-            pcf = safe_div(mkt_cap, ttm_cf) if not pd.isna(ttm_cf) else np.nan
-
-            if not show_neg_pe and not pd.isna(pe) and pe <= 0:
-                pe = np.nan
-
-            rows.append({
-                "Period End": pd.Timestamp(date).strftime("%Y-%m-%d"),
-                "Price": round(price, 2),
-                "Revenue ($M)": round(rev / 1e6, 1) if not pd.isna(rev) else np.nan,
-                "P/S": round(ps, 2) if not pd.isna(ps) else np.nan,
-                "Net Income ($M)": round(ni / 1e6, 1) if not pd.isna(ni) else np.nan,
-                "P/E": round(pe, 2) if not pd.isna(pe) else np.nan,
-                "CF ($M)": round(ttm_cf / 1e6, 1) if not pd.isna(ttm_cf) else np.nan,
-                "P/CF": round(pcf, 2) if not pd.isna(pcf) else np.nan,
-            })
-        except Exception:
+    for i, stmt in enumerate(statements):
+        if is_quarterly and i < 3:
             continue
+
+        date = stmt.get("date")
+        revenue = stmt.get("revenue")
+        net_income = stmt.get("netIncome")
+
+        # TTM for quarterly
+        if is_quarterly:
+            rev_ttm = sum(s.get("revenue") or 0 for s in statements[i-3:i+1])
+            ni_ttm = sum(s.get("netIncome") or 0 for s in statements[i-3:i+1])
+        else:
+            rev_ttm = revenue
+            ni_ttm = net_income
+
+        cf = cash_map.get(date, {})
+        if use_fcf:
+            cf_val = cf.get("freeCashFlow")
+        else:
+            cf_val = cf.get("operatingCashFlow")
+
+        if is_quarterly and cf_val is not None:
+            # Approximate TTM CF from the 4 quarters ending on this date
+            dates_window = [s.get("date") for s in statements[i-3:i+1]]
+            cf_ttm = sum((cash_map.get(d, {}).get("freeCashFlow" if use_fcf else "operatingCashFlow") or 0) for d in dates_window)
+        else:
+            cf_ttm = cf_val
+
+        price = stmt.get("price") or None  # FMP income statements sometimes include price
+        # Fallback: we don't have historical price aligned perfectly; use statement data where available
+        # For simplicity we show the statement values; historical price matching can be added later
+
+        # Use weighted average shares if available
+        shares = stmt.get("weightedAverageShsOut") or stmt.get("weightedAverageShsOutDil")
+
+        if not shares or shares <= 0:
+            continue
+
+        # Approximate price from market cap if present, else skip detailed price
+        mkt_cap = stmt.get("marketCap")
+        price = safe_div(mkt_cap, shares) if mkt_cap else np.nan
+
+        ps = safe_div(mkt_cap, rev_ttm) if mkt_cap else np.nan
+        pe = safe_div(price, safe_div(ni_ttm, shares)) if ni_ttm else np.nan
+        pcf = safe_div(mkt_cap, cf_ttm) if cf_ttm and mkt_cap else np.nan
+
+        if not show_neg_pe and not pd.isna(pe) and pe <= 0:
+            pe = np.nan
+
+        rows.append({
+            "Period End": date,
+            "Revenue ($M)": round((rev_ttm or 0) / 1e6, 1),
+            "P/S": round(ps, 2) if not pd.isna(ps) else np.nan,
+            "Net Income ($M)": round((ni_ttm or 0) / 1e6, 1),
+            "P/E": round(pe, 2) if not pd.isna(pe) else np.nan,
+            "CF ($M)": round((cf_ttm or 0) / 1e6, 1) if cf_ttm else np.nan,
+            "P/CF": round(pcf, 2) if not pd.isna(pcf) else np.nan,
+        })
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -229,6 +173,10 @@ def build_table(data, is_quarterly=False, use_fcf=False, show_neg_pe=True):
 
 
 # -------------------- Main --------------------
+if not api_key:
+    st.info("Enter your free Financial Modeling Prep API key in the sidebar to begin.")
+    st.stop()
+
 tickers = parse_tickers(ticker_input)
 if not tickers:
     st.warning("Enter at least one valid ticker.")
@@ -241,49 +189,40 @@ errors = []
 
 progress = st.progress(0)
 for i, ticker in enumerate(tickers):
-    data, err = load_data(ticker)
+    data, err = load_ticker(ticker, api_key)
     if err or data is None:
         errors.append(f"{ticker}: {err or 'No data'}")
     else:
-        q_df = build_table(data, is_quarterly=True, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
-        a_df = build_table(data, is_quarterly=False, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
+        q_df = build_table(data["income_q"], data["cash_q"], is_quarterly=True, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
+        a_df = build_table(data["income_a"], data["cash_a"], is_quarterly=False, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
 
-        price = data.get("price") or {}
-        summary = data.get("summary") or {}
-        fin = data.get("financial") or {}
-
-        if not isinstance(price, dict):
-            price = {}
-        if not isinstance(summary, dict):
-            summary = {}
-        if not isinstance(fin, dict):
-            fin = {}
+        quote = data["quote"]
+        ratios = data["ratios_ttm"]
 
         current = {
             "Ticker": ticker,
-            "Name": price.get("longName") or price.get("shortName") or ticker,
-            "Price": price.get("regularMarketPrice") or summary.get("previousClose"),
-            "P/S": summary.get("priceToSalesTrailing12Months") or fin.get("priceToSales"),
-            "P/E": summary.get("trailingPE") or fin.get("trailingPE"),
-            "P/OCF": summary.get("priceToOperatingCashflow") or fin.get("priceToCashflow"),
-            "Market Cap": price.get("marketCap") or summary.get("marketCap"),
+            "Name": quote.get("name") or ticker,
+            "Price": quote.get("price"),
+            "P/S": ratios.get("priceToSalesRatioTTM") or quote.get("priceToSales"),
+            "P/E": ratios.get("priceToEarningsRatioTTM") or quote.get("pe"),
+            "P/OCF": ratios.get("priceToOperatingCashFlowRatioTTM") or ratios.get("priceToFreeCashFlowRatioTTM"),
+            "Market Cap": quote.get("marketCap"),
             "q_df": q_df,
             "a_df": a_df,
         }
         results.append(current)
     progress.progress((i + 1) / len(tickers))
-    time.sleep(0.5)
+    time.sleep(0.3)
 
 progress.empty()
 
 if errors:
-    with st.expander("⚠️ Data issues (Yahoo often blocks cloud IPs)"):
+    with st.expander("⚠️ Data issues"):
         for e in errors:
             st.write(e)
-        st.caption("Try rebooting the app or waiting a few minutes. This is a Yahoo-side restriction, not a bug in the app.")
 
 if not results:
-    st.error("No data could be loaded. Yahoo Finance is currently blocking requests from Streamlit Cloud. Wait a few minutes and refresh, or reboot the app.")
+    st.error("No data could be loaded. Check your API key and ticker.")
     st.stop()
 
 cf_label = "P/FCF" if use_fcf else "P/OCF"
@@ -386,4 +325,4 @@ for res in results:
             st.info("Not enough data for charts.")
 
 st.markdown("---")
-st.caption("Data via yahooquery · Approximate · Educational use only · Not financial advice.")
+st.caption("Data from Financial Modeling Prep · Approximate · Educational use only · Not financial advice.")
