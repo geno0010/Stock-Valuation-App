@@ -21,7 +21,6 @@ st.caption("P/S · P/E · P/OCF · Powered by Financial Modeling Prep · History
 
 with st.sidebar:
     st.header("Settings")
-    # API key from Streamlit secrets (preferred) or fallback to input
     api_key = st.secrets.get("FMP_API_KEY", "")
     if not api_key:
         api_key = st.text_input(
@@ -64,32 +63,27 @@ def fmp_get(endpoint: str, params: dict, api_key: str):
     params["apikey"] = api_key
     try:
         r = requests.get(f"https://financialmodelingprep.com/stable/{endpoint}", params=params, timeout=15)
-        r.raise_for_status()
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}: {r.text[:300]}"
         data = r.json()
-        if isinstance(data, dict) and "Error Message" in data:
-            return None, data["Error Message"]
+        if isinstance(data, dict) and ("Error Message" in data or "error" in data):
+            return None, str(data.get("Error Message") or data.get("error") or data)
         return data, None
     except Exception as e:
         return None, str(e)
 
 
 def load_ticker(ticker: str, api_key: str):
-    # Quote
     quote, err = fmp_get("quote", {"symbol": ticker}, api_key)
     if err or not quote or not isinstance(quote, list) or len(quote) == 0:
-        return None, err or "No quote data"
+        return None, err or f"No quote data for {ticker}"
 
     quote = quote[0]
 
-    # Income statements (quarterly and annual)
     income_q, err_q = fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 20}, api_key)
     income_a, err_a = fmp_get("income-statement", {"symbol": ticker, "period": "annual", "limit": 10}, api_key)
-
-    # Cash flow
     cash_q, err_cq = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 20}, api_key)
     cash_a, err_ca = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "annual", "limit": 10}, api_key)
-
-    # Ratios (for current values)
     ratios_ttm, _ = fmp_get("ratios-ttm", {"symbol": ticker}, api_key)
 
     return {
@@ -100,6 +94,7 @@ def load_ticker(ticker: str, api_key: str):
         "cash_a": cash_a if isinstance(cash_a, list) else [],
         "ratios_ttm": ratios_ttm[0] if isinstance(ratios_ttm, list) and ratios_ttm else {},
         "ticker": ticker,
+        "errors": [e for e in [err_q, err_a, err_cq, err_ca] if e],
     }, None
 
 
@@ -107,7 +102,6 @@ def build_table(statements, cashflows, is_quarterly=False, use_fcf=False, show_n
     if not statements:
         return pd.DataFrame()
 
-    # Sort by date ascending
     statements = sorted(statements, key=lambda x: x.get("date", ""))
     cash_map = {c.get("date"): c for c in (cashflows or [])}
 
@@ -120,7 +114,6 @@ def build_table(statements, cashflows, is_quarterly=False, use_fcf=False, show_n
         revenue = stmt.get("revenue")
         net_income = stmt.get("netIncome")
 
-        # TTM for quarterly
         if is_quarterly:
             rev_ttm = sum(s.get("revenue") or 0 for s in statements[i-3:i+1])
             ni_ttm = sum(s.get("netIncome") or 0 for s in statements[i-3:i+1])
@@ -134,26 +127,18 @@ def build_table(statements, cashflows, is_quarterly=False, use_fcf=False, show_n
         else:
             cf_val = cf.get("operatingCashFlow")
 
-        if is_quarterly and cf_val is not None:
-            # Approximate TTM CF from the 4 quarters ending on this date
+        if is_quarterly:
             dates_window = [s.get("date") for s in statements[i-3:i+1]]
             cf_ttm = sum((cash_map.get(d, {}).get("freeCashFlow" if use_fcf else "operatingCashFlow") or 0) for d in dates_window)
         else:
             cf_ttm = cf_val
 
-        price = stmt.get("price") or None  # FMP income statements sometimes include price
-        # Fallback: we don't have historical price aligned perfectly; use statement data where available
-        # For simplicity we show the statement values; historical price matching can be added later
-
-        # Use weighted average shares if available
         shares = stmt.get("weightedAverageShsOut") or stmt.get("weightedAverageShsOutDil")
+        mkt_cap = stmt.get("marketCap")
+        price = safe_div(mkt_cap, shares) if mkt_cap and shares else np.nan
 
         if not shares or shares <= 0:
             continue
-
-        # Approximate price from market cap if present, else skip detailed price
-        mkt_cap = stmt.get("marketCap")
-        price = safe_div(mkt_cap, shares) if mkt_cap else np.nan
 
         ps = safe_div(mkt_cap, rev_ttm) if mkt_cap else np.nan
         pe = safe_div(price, safe_div(ni_ttm, shares)) if ni_ttm else np.nan
@@ -217,6 +202,8 @@ for i, ticker in enumerate(tickers):
             "a_df": a_df,
         }
         results.append(current)
+        if data.get("errors"):
+            errors.extend([f"{ticker}: {e}" for e in data["errors"]])
     progress.progress((i + 1) / len(tickers))
     time.sleep(0.3)
 
@@ -228,7 +215,7 @@ if errors:
             st.write(e)
 
 if not results:
-    st.error("No data could be loaded. Check your API key and ticker.")
+    st.error("No data could be loaded. Check the error details above.")
     st.stop()
 
 cf_label = "P/FCF" if use_fcf else "P/OCF"
