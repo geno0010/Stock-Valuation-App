@@ -186,6 +186,7 @@ for i, ticker in enumerate(tickers):
             "Market Cap": profile.get("marketCapitalization"),
             "annual_df": annual_df,
             "quarterly_df": quarterly_df,
+            "metrics": metrics,
         }
         results.append(current)
         if data.get("errors"):
@@ -214,6 +215,35 @@ for res in results:
     c3.metric("P/E", f"{pe:.2f}" if pe and (pe > 0 or show_negative_pe) else ("N/A (loss)" if pe is not None else "—"))
     c4.metric("P/OCF", f"{res['P/OCF']:.2f}" if res.get("P/OCF") else "—")
     c5.metric("Market Cap", f"${res['Market Cap']/1e3:.1f}B" if res.get("Market Cap") else "—")
+
+    # Growth section
+    m = res.get("metrics", {})
+    eps_growth = m.get("epsGrowthTTMYoy") or m.get("epsGrowth5Y") or m.get("epsGrowth3Y")
+    rev_growth = m.get("revenueGrowthTTMYoy") or m.get("revenueGrowth5Y") or m.get("revenueGrowth3Y")
+
+    st.markdown("**Growth**")
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        if eps_growth is not None:
+            st.metric("EPS Growth (approx)", f"{eps_growth:.1f}%")
+        else:
+            st.metric("EPS Growth", "N/A (free tier)")
+    with g2:
+        if rev_growth is not None:
+            st.metric("Revenue Growth (approx)", f"{rev_growth:.1f}%")
+        else:
+            st.metric("Revenue Growth", "N/A (free tier)")
+    with g3:
+        # Simple quality check
+        note = "Limited growth data"
+        if eps_growth is not None and rev_growth is not None:
+            if eps_growth > 5 and rev_growth > 5:
+                note = "Growth supports valuation"
+            elif eps_growth < 0 or rev_growth < 0:
+                note = "Possible value trap — check growth"
+            else:
+                note = "Mixed growth — review further"
+        st.metric("Quality check", note)
 
     tab1, tab2 = st.tabs(["Quarterly", "Annual"])
 
