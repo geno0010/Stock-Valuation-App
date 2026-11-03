@@ -194,7 +194,18 @@ for res in results:
             st.info("Limited or no annual history.")
         else:
             st.write(f"**{len(res['annual_df'])} annual periods**")
-            st.dataframe(res["annual_df"], width="stretch", hide_index=True)
+            st.dataframe(
+                res["annual_df"],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Period End": st.column_config.TextColumn(width="small"),
+                    "P/S": st.column_config.NumberColumn(format="%.2f", width="small"),
+                    "P/E": st.column_config.NumberColumn(format="%.2f", width="small"),
+                    "P/CF": st.column_config.NumberColumn(format="%.2f", width="small"),
+                    "P/B": st.column_config.NumberColumn(format="%.2f", width="small"),
+                }
+            )
 
     # Averages and current vs history (prefer annual if available)
     use_df = res["annual_df"] if len(res["annual_df"]) >= 3 else res["quarterly_df"]
