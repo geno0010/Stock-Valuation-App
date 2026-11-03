@@ -44,11 +44,10 @@ Then commit and reboot again.
 
 with st.sidebar:
     st.header("Settings")
-    ticker_input = st.text_area(
+    ticker_input = st.text_input(
         "Ticker(s)",
         value="AAPL",
-        height=80,
-        help="One or more tickers (comma, space, or newline). Example: AAPL, MSFT, NTRA"
+        help="One or more tickers (comma or space separated). Example: AAPL, MSFT, NTRA. Press Enter to run."
     )
     use_fcf = st.checkbox("Prefer Free Cash Flow (P/FCF)", value=False)
     show_negative_pe = st.checkbox("Show negative P/E values", value=True)
