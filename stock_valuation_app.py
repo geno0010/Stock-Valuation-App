@@ -1,46 +1,36 @@
 #!/usr/bin/env python3
 """
-Stock Valuation Ratios App (hardened)
-Current + historical P/S, P/E, P/OCF / P/FCF
-Handles multiple tickers, suppresses warnings, and is more resilient to Yahoo 401/crumb issues.
+Stock Valuation Ratios App
+Uses yahooquery (more reliable than yfinance for 401/crumb issues on cloud)
 """
 
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*inplace.*")
-warnings.filterwarnings("ignore", category=UserWarning, module="yfinance")
+warnings.filterwarnings("ignore")
 
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
 import re
+from yahooquery import Ticker
 
 st.set_page_config(page_title="Stock Valuation Ratios", page_icon="📊", layout="wide")
 
 st.title("📊 Stock Valuation Ratios")
-st.caption("P/S · P/E · P/OCF · Multiple tickers · Current · History · Averages · % vs History")
+st.caption("P/S · P/E · P/OCF · Powered by yahooquery · Multiple tickers · History · Averages · % vs History")
 
 with st.sidebar:
     st.header("Settings")
     ticker_input = st.text_area(
         "Ticker(s)",
-        value="NTRA",
+        value="AAPL",
         height=80,
-        help="One ticker or several (comma, space, or newline separated). Example: NTRA, AAPL, MSFT"
+        help="One or more tickers (comma, space, or newline). Example: AAPL, MSFT, NTRA"
     )
     use_fcf = st.checkbox("Prefer Free Cash Flow (P/FCF)", value=False)
     show_negative_pe = st.checkbox("Show negative P/E values", value=True)
     st.markdown("---")
-    st.markdown("""
-**Notes**
-- Data from Yahoo Finance via yfinance
-- Quarterly data is often limited to the last 4–6 periods
-- Annual data usually goes back further
-- Multiple tickers supported (comma / space / newline)
-- 401/crumb errors are retried automatically
-""")
+    st.info("Using **yahooquery** for better reliability when yfinance hits 401 errors.")
 
 
 def parse_tickers(raw: str) -> list[str]:
@@ -51,137 +41,151 @@ def parse_tickers(raw: str) -> list[str]:
 
 
 def safe_div(a, b):
-    if b is None or b == 0 or (isinstance(b, float) and np.isnan(b)):
-        return np.nan
-    return a / b
-
-
-def get_price_near(hist, date):
-    if hist is None or hist.empty:
-        return np.nan
     try:
-        if hist.index.tz is not None:
-            hist = hist.copy()
-            hist.index = hist.index.tz_localize(None)
-        date = pd.Timestamp(date).tz_localize(None) if getattr(date, "tzinfo", None) else pd.Timestamp(date)
-        available = hist[hist.index <= date]
-        if available.empty:
+        if b is None or b == 0 or pd.isna(b):
             return np.nan
-        return float(available["Close"].iloc[-1])
+        return a / b
     except Exception:
         return np.nan
 
 
-def find_col(df, candidates):
-    if df is None or df.empty:
-        return None
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
+def load_with_yahooquery(ticker: str):
+    try:
+        t = Ticker(ticker)
+        # Summary details for current ratios
+        summary = t.summary_detail.get(ticker, {})
+        financial_data = t.financial_data.get(ticker, {})
+        price = t.price.get(ticker, {})
+        key_stats = t.key_stats.get(ticker, {})
+
+        # Historical financials
+        income = t.income_statement(frequency="a")  # annual
+        income_q = t.income_statement(frequency="q")
+        cashflow = t.cash_flow(frequency="a")
+        cashflow_q = t.cash_flow(frequency="q")
+
+        # Price history for historical prices
+        hist = t.history(period="5y", interval="1d")
+
+        return {
+            "summary": summary,
+            "financial_data": financial_data,
+            "price": price,
+            "key_stats": key_stats,
+            "income_a": income,
+            "income_q": income_q,
+            "cashflow_a": cashflow,
+            "cashflow_q": cashflow_q,
+            "hist": hist,
+            "error": None
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
-def load_ticker_safe(ticker: str, max_retries: int = 3):
-    """Load data with retries for common yfinance 401/crumb failures."""
-    for attempt in range(max_retries):
-        try:
-            t = yf.Ticker(ticker)
-            time.sleep(0.4 + attempt * 0.3)
-            info = t.info or {}
-            if not info or info.get("quoteType") is None:
-                raise ValueError("Empty info")
-            q_inc = t.quarterly_income_stmt
-            a_inc = t.income_stmt
-            q_cf = t.quarterly_cashflow
-            a_cf = t.cashflow
-            hist = t.history(period="5y", auto_adjust=True)
-            return info, q_inc, a_inc, q_cf, a_cf, hist, None
-        except Exception as e:
-            err = str(e)
-            if attempt < max_retries - 1 and ("401" in err or "Unauthorized" in err or "crumb" in err.lower() or "delisted" in err.lower()):
-                time.sleep(1.5)
-                continue
-            return None, None, None, None, None, None, err
-    return None, None, None, None, None, None, "Max retries exceeded"
+def build_history_table(data, is_quarterly=False, use_fcf=False, show_neg_pe=True):
+    income_key = "income_q" if is_quarterly else "income_a"
+    cf_key = "cashflow_q" if is_quarterly else "cashflow_a"
+    income = data.get(income_key)
+    cf = data.get(cf_key)
+    hist = data.get("hist")
 
-
-def compute_ratios(income, cashflow, hist, shares, is_quarterly=True, use_fcf=False, show_neg_pe=True):
     if income is None or income.empty:
         return pd.DataFrame()
 
     try:
-        income = income.T.sort_index()
+        # yahooquery income statement is usually MultiIndex or date-indexed
+        if isinstance(income.index, pd.MultiIndex):
+            income = income.reset_index()
+        if "asOfDate" in income.columns:
+            income = income.set_index("asOfDate")
+        income = income.sort_index()
+
+        if cf is not None and not cf.empty:
+            if isinstance(cf.index, pd.MultiIndex):
+                cf = cf.reset_index()
+            if "asOfDate" in cf.columns:
+                cf = cf.set_index("asOfDate")
+            cf = cf.sort_index()
+        else:
+            cf = pd.DataFrame()
     except Exception:
         return pd.DataFrame()
-
-    cf = pd.DataFrame()
-    if cashflow is not None and not cashflow.empty:
-        try:
-            cf = cashflow.T.sort_index()
-        except Exception:
-            cf = pd.DataFrame()
-
-    rev_col = find_col(income, ["Total Revenue", "Operating Revenue", "Revenue"])
-    ni_col = find_col(income, ["Net Income", "Net Income Common Stockholders",
-                               "Net Income From Continuing Operation Net Minority Interest"])
-    if rev_col is None:
-        return pd.DataFrame()
-
-    ocf_col = find_col(cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities",
-                            "Total Cash From Operating Activities"])
-    fcf_col = find_col(cf, ["Free Cash Flow"])
-    if fcf_col is None and ocf_col and "Capital Expenditure" in cf.columns:
-        try:
-            cf = cf.copy()
-            cf["Free Cash Flow"] = cf[ocf_col] + cf["Capital Expenditure"]
-            fcf_col = "Free Cash Flow"
-        except Exception:
-            pass
 
     rows = []
     dates = list(income.index)
 
-    for i, q_date in enumerate(dates):
+    for i, date in enumerate(dates):
         try:
+            if is_quarterly and i < 3:
+                continue
+
+            # Revenue
+            rev = income.get("TotalRevenue", income.get("OperatingRevenue", pd.Series())).iloc[i] if is_quarterly else income.get("TotalRevenue", pd.Series()).iloc[i]
             if is_quarterly:
-                if i < 3:
-                    continue
-                ttm_rev = income[rev_col].iloc[i-3:i+1].sum()
-                ttm_ni = income[ni_col].iloc[i-3:i+1].sum() if ni_col else np.nan
-                ttm_cf = np.nan
-                if use_fcf and fcf_col and fcf_col in cf.columns:
+                rev = income["TotalRevenue"].iloc[i-3:i+1].sum() if "TotalRevenue" in income.columns else np.nan
+
+            # Net Income
+            ni = np.nan
+            for col in ["NetIncome", "NetIncomeCommonStockholders", "NetIncomeContinuousOperations"]:
+                if col in income.columns:
+                    if is_quarterly:
+                        ni = income[col].iloc[i-3:i+1].sum()
+                    else:
+                        ni = income[col].iloc[i]
+                    break
+
+            # Cash flow
+            ttm_cf = np.nan
+            ocf_col = next((c for c in ["OperatingCashFlow", "CashFlowFromContinuingOperatingActivities"] if c in cf.columns), None)
+            fcf_col = "FreeCashFlow" if "FreeCashFlow" in cf.columns else None
+            if use_fcf and fcf_col:
+                if is_quarterly:
                     ttm_cf = cf[fcf_col].reindex(income.index).iloc[i-3:i+1].sum()
-                elif ocf_col and ocf_col in cf.columns:
-                    ttm_cf = cf[ocf_col].reindex(income.index).iloc[i-3:i+1].sum()
-            else:
-                ttm_rev = income[rev_col].iloc[i]
-                ttm_ni = income[ni_col].iloc[i] if ni_col else np.nan
-                ttm_cf = np.nan
-                if use_fcf and fcf_col and fcf_col in cf.columns:
+                else:
                     ttm_cf = cf[fcf_col].reindex(income.index).iloc[i]
-                elif ocf_col and ocf_col in cf.columns:
+            elif ocf_col:
+                if is_quarterly:
+                    ttm_cf = cf[ocf_col].reindex(income.index).iloc[i-3:i+1].sum()
+                else:
                     ttm_cf = cf[ocf_col].reindex(income.index).iloc[i]
 
-            price = get_price_near(hist, q_date)
-            if pd.isna(price) or price <= 0 or shares is None or shares <= 0:
+            # Price near date
+            price = np.nan
+            if hist is not None and not hist.empty:
+                try:
+                    h = hist.copy()
+                    if isinstance(h.index, pd.MultiIndex):
+                        h = h.reset_index()
+                        h = h[h["symbol"] == data.get("ticker", "")] if "symbol" in h.columns else h
+                    if "date" in h.columns:
+                        h = h.set_index("date")
+                    h.index = pd.to_datetime(h.index).tz_localize(None)
+                    avail = h[h.index <= pd.Timestamp(date).tz_localize(None)]
+                    if not avail.empty:
+                        price = float(avail["close"].iloc[-1])
+                except Exception:
+                    pass
+
+            shares = data["key_stats"].get("sharesOutstanding") or data["summary"].get("sharesOutstanding")
+            if pd.isna(price) or price <= 0 or not shares:
                 continue
 
             mkt_cap = price * shares
-            ps = safe_div(mkt_cap, ttm_rev)
-            pe = safe_div(price, ttm_ni / shares) if ttm_ni is not None and not pd.isna(ttm_ni) else np.nan
+            ps = safe_div(mkt_cap, rev)
+            pe = safe_div(price, ni / shares) if not pd.isna(ni) else np.nan
             pcf = safe_div(mkt_cap, ttm_cf) if not pd.isna(ttm_cf) else np.nan
 
-            pe_disp = pe
-            if not pd.isna(pe) and pe <= 0 and not show_neg_pe:
-                pe_disp = np.nan
+            if not show_neg_pe and not pd.isna(pe) and pe <= 0:
+                pe = np.nan
 
             rows.append({
-                "Period End": q_date.strftime("%Y-%m-%d") if hasattr(q_date, "strftime") else str(q_date)[:10],
+                "Period End": pd.Timestamp(date).strftime("%Y-%m-%d"),
                 "Price": round(price, 2),
-                "Revenue ($M)": round(ttm_rev / 1e6, 1) if not pd.isna(ttm_rev) else np.nan,
+                "Revenue ($M)": round(rev / 1e6, 1) if not pd.isna(rev) else np.nan,
                 "P/S": round(ps, 2) if not pd.isna(ps) else np.nan,
-                "Net Income ($M)": round(ttm_ni / 1e6, 1) if not pd.isna(ttm_ni) else np.nan,
-                "P/E": round(pe_disp, 2) if not pd.isna(pe_disp) else np.nan,
+                "Net Income ($M)": round(ni / 1e6, 1) if not pd.isna(ni) else np.nan,
+                "P/E": round(pe, 2) if not pd.isna(pe) else np.nan,
                 "CF ($M)": round(ttm_cf / 1e6, 1) if not pd.isna(ttm_cf) else np.nan,
                 "P/CF": round(pcf, 2) if not pd.isna(pcf) else np.nan,
             })
@@ -207,42 +211,42 @@ errors = []
 
 progress = st.progress(0)
 for i, ticker in enumerate(tickers):
-    info, q_inc, a_inc, q_cf, a_cf, hist, err = load_ticker_safe(ticker)
-    if err:
-        errors.append(f"{ticker}: {err}")
-        progress.progress((i + 1) / len(tickers))
-        continue
+    data = load_with_yahooquery(ticker)
+    data["ticker"] = ticker
+    if data.get("error"):
+        errors.append(f"{ticker}: {data['error']}")
+    else:
+        q_df = build_history_table(data, is_quarterly=True, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
+        a_df = build_history_table(data, is_quarterly=False, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
 
-    shares = info.get("sharesOutstanding")
-    q_df = compute_ratios(q_inc, q_cf, hist, shares, is_quarterly=True,
-                          use_fcf=use_fcf, show_neg_pe=show_negative_pe)
-    a_df = compute_ratios(a_inc, a_cf, hist, shares, is_quarterly=False,
-                          use_fcf=use_fcf, show_neg_pe=show_negative_pe)
+        summary = data["summary"]
+        price_info = data["price"]
+        fin = data["financial_data"]
 
-    current = {
-        "Ticker": ticker,
-        "Name": info.get("longName") or info.get("shortName") or ticker,
-        "Price": info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose"),
-        "P/S": info.get("priceToSalesTrailing12Months"),
-        "P/E": info.get("trailingPE"),
-        "P/OCF": info.get("priceToOperatingCashflow") or info.get("priceToCashflow"),
-        "Market Cap": info.get("marketCap"),
-        "q_df": q_df,
-        "a_df": a_df,
-    }
-    results.append(current)
+        current = {
+            "Ticker": ticker,
+            "Name": price_info.get("longName") or price_info.get("shortName") or ticker,
+            "Price": price_info.get("regularMarketPrice") or summary.get("previousClose"),
+            "P/S": summary.get("priceToSalesTrailing12Months") or fin.get("priceToSales"),
+            "P/E": summary.get("trailingPE") or fin.get("trailingPE"),
+            "P/OCF": summary.get("priceToOperatingCashflow") or fin.get("priceToCashflow"),
+            "Market Cap": price_info.get("marketCap") or summary.get("marketCap"),
+            "q_df": q_df,
+            "a_df": a_df,
+        }
+        results.append(current)
     progress.progress((i + 1) / len(tickers))
+    time.sleep(0.3)
 
 progress.empty()
 
 if errors:
-    with st.expander("⚠️ Data issues (Yahoo 401 / crumb / rate limit)"):
+    with st.expander("⚠️ Data issues"):
         for e in errors:
             st.write(e)
-        st.caption("These are usually temporary. Wait a minute and refresh, or try fewer tickers at once.")
 
 if not results:
-    st.error("No data could be loaded for any ticker. Yahoo Finance is currently blocking requests. Try again in a few minutes.")
+    st.error("No data could be loaded. Yahoo may be blocking requests right now. Try again in a few minutes.")
     st.stop()
 
 cf_label = "P/FCF" if use_fcf else "P/OCF"
@@ -275,7 +279,7 @@ for res in results:
             st.write(f"**{len(res['a_df'])} annual periods**")
             st.dataframe(res["a_df"], use_container_width=True, hide_index=True)
 
-    # Averages (prefer annual if enough data)
+    # Averages
     use_df = res["a_df"] if len(res["a_df"]) >= 3 else res["q_df"]
     n = len(use_df)
     label = "Annual" if (use_df is res["a_df"] and not res["a_df"].empty) else "Quarterly"
@@ -326,4 +330,4 @@ for res in results:
                 st.write(f"{cf_label}: —")
 
 st.markdown("---")
-st.caption("Data from Yahoo Finance · Approximate · Educational use only · Not financial advice. 401 errors are usually temporary.")
+st.caption("Data via yahooquery (Yahoo Finance) · Approximate · Educational use only · Not financial advice.")
