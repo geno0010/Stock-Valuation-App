@@ -84,6 +84,8 @@ def load_ticker(ticker: str, api_key: str):
     income_a, err_a = fmp_get("income-statement", {"symbol": ticker, "period": "annual", "limit": 5}, api_key)
     cash_q, err_cq = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "quarter", "limit": 5}, api_key)
     cash_a, err_ca = fmp_get("cash-flow-statement", {"symbol": ticker, "period": "annual", "limit": 5}, api_key)
+    ratios_q, err_rq = fmp_get("ratios", {"symbol": ticker, "period": "quarter", "limit": 5}, api_key)
+    ratios_a, err_ra = fmp_get("ratios", {"symbol": ticker, "period": "annual", "limit": 5}, api_key)
     ratios_ttm, _ = fmp_get("ratios-ttm", {"symbol": ticker}, api_key)
 
     return {
@@ -92,69 +94,47 @@ def load_ticker(ticker: str, api_key: str):
         "income_a": income_a if isinstance(income_a, list) else [],
         "cash_q": cash_q if isinstance(cash_q, list) else [],
         "cash_a": cash_a if isinstance(cash_a, list) else [],
+        "ratios_q": ratios_q if isinstance(ratios_q, list) else [],
+        "ratios_a": ratios_a if isinstance(ratios_a, list) else [],
         "ratios_ttm": ratios_ttm[0] if isinstance(ratios_ttm, list) and ratios_ttm else {},
         "ticker": ticker,
-        "errors": [e for e in [err_q, err_a, err_cq, err_ca] if e],
+        "errors": [e for e in [err_q, err_a, err_cq, err_ca, err_rq, err_ra] if e],
     }, None
 
 
-def build_table(statements, cashflows, is_quarterly=False, use_fcf=False, show_neg_pe=True):
-    if not statements:
+def build_table(statements, cashflows, ratios, is_quarterly=False, use_fcf=False, show_neg_pe=True):
+    if not ratios:
         return pd.DataFrame()
 
-    statements = sorted(statements, key=lambda x: x.get("date", ""))
+    ratios = sorted(ratios, key=lambda x: x.get("date", ""))
+    stmt_map = {s.get("date"): s for s in (statements or [])}
     cash_map = {c.get("date"): c for c in (cashflows or [])}
 
     rows = []
-    for i, stmt in enumerate(statements):
-        if is_quarterly and i < 3:
-            continue
+    for r in ratios:
+        date = r.get("date")
+        stmt = stmt_map.get(date, {})
+        cf = cash_map.get(date, {})
 
-        date = stmt.get("date")
         revenue = stmt.get("revenue")
         net_income = stmt.get("netIncome")
+        cf_val = cf.get("freeCashFlow") if use_fcf else cf.get("operatingCashFlow")
 
-        if is_quarterly:
-            rev_ttm = sum(s.get("revenue") or 0 for s in statements[i-3:i+1])
-            ni_ttm = sum(s.get("netIncome") or 0 for s in statements[i-3:i+1])
-        else:
-            rev_ttm = revenue
-            ni_ttm = net_income
+        ps = r.get("priceToSalesRatio")
+        pe = r.get("priceToEarningsRatio")
+        pcf = r.get("priceToFreeCashFlowRatio") if use_fcf else r.get("priceToOperatingCashFlowRatio")
 
-        cf = cash_map.get(date, {})
-        if use_fcf:
-            cf_val = cf.get("freeCashFlow")
-        else:
-            cf_val = cf.get("operatingCashFlow")
-
-        if is_quarterly:
-            dates_window = [s.get("date") for s in statements[i-3:i+1]]
-            cf_ttm = sum((cash_map.get(d, {}).get("freeCashFlow" if use_fcf else "operatingCashFlow") or 0) for d in dates_window)
-        else:
-            cf_ttm = cf_val
-
-        shares = stmt.get("weightedAverageShsOut") or stmt.get("weightedAverageShsOutDil")
-        mkt_cap = stmt.get("marketCap")
-        price = safe_div(mkt_cap, shares) if mkt_cap and shares else np.nan
-
-        if not shares or shares <= 0:
-            continue
-
-        ps = safe_div(mkt_cap, rev_ttm) if mkt_cap else np.nan
-        pe = safe_div(price, safe_div(ni_ttm, shares)) if ni_ttm else np.nan
-        pcf = safe_div(mkt_cap, cf_ttm) if cf_ttm and mkt_cap else np.nan
-
-        if not show_neg_pe and not pd.isna(pe) and pe <= 0:
+        if not show_neg_pe and pe is not None and pe <= 0:
             pe = np.nan
 
         rows.append({
             "Period End": date,
-            "Revenue ($M)": round((rev_ttm or 0) / 1e6, 1),
-            "P/S": round(ps, 2) if not pd.isna(ps) else np.nan,
-            "Net Income ($M)": round((ni_ttm or 0) / 1e6, 1),
-            "P/E": round(pe, 2) if not pd.isna(pe) else np.nan,
-            "CF ($M)": round((cf_ttm or 0) / 1e6, 1) if cf_ttm else np.nan,
-            "P/CF": round(pcf, 2) if not pd.isna(pcf) else np.nan,
+            "Revenue ($M)": round((revenue or 0) / 1e6, 1) if revenue else np.nan,
+            "P/S": round(ps, 2) if ps is not None else np.nan,
+            "Net Income ($M)": round((net_income or 0) / 1e6, 1) if net_income else np.nan,
+            "P/E": round(pe, 2) if pe is not None else np.nan,
+            "CF ($M)": round((cf_val or 0) / 1e6, 1) if cf_val else np.nan,
+            "P/CF": round(pcf, 2) if pcf is not None else np.nan,
         })
 
     df = pd.DataFrame(rows)
@@ -184,8 +164,8 @@ for i, ticker in enumerate(tickers):
     if err or data is None:
         errors.append(f"{ticker}: {err or 'No data'}")
     else:
-        q_df = build_table(data["income_q"], data["cash_q"], is_quarterly=True, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
-        a_df = build_table(data["income_a"], data["cash_a"], is_quarterly=False, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
+        q_df = build_table(data["income_q"], data["cash_q"], data["ratios_q"], is_quarterly=True, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
+        a_df = build_table(data["income_a"], data["cash_a"], data["ratios_a"], is_quarterly=False, use_fcf=use_fcf, show_neg_pe=show_negative_pe)
 
         quote = data["quote"]
         ratios = data["ratios_ttm"]
